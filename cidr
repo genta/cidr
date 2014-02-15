@@ -1,0 +1,257 @@
+#!/usr/bin/env ruby
+# $Id: cidr,v 1.1 2004/04/06 12:26:46 genta Exp $
+
+require 'readline'
+
+#
+# Constants
+#
+
+BITLENGTH = 32
+ALLONE = (2 ** BITLENGTH - 1)
+DEFAULT_IP = "192.168.0.0"
+
+PROMPT = {
+  :global            => 'cidr> ',
+  :expect_subnetmask => '(subnet)> ',
+}
+
+
+#
+# Global Variables
+#
+
+$flag_full = false
+$flag_verbose = 0
+$flag_dump = false
+$address = []
+
+
+
+###########################################################################
+# Procedures
+###########################################################################
+
+#
+# show usage
+#
+
+def usage
+  print <<-"EOT".gsub(/^    /, '')
+    usage: #{File.basename($0)} [-d [-f]] [IP_adress]/<prefix_length>
+    options:
+      -d  switch to fping mode (dump IP addresses)
+      -f  sub-option of -d.  dump with broadcast/network address.
+  EOT
+
+  exit(1)
+end
+
+#
+# IP address <=> String conversion
+#
+
+def str2ipaddr(str, delim = '.')
+  ipaddr = 0
+  str.split(delim).each {|o| ipaddr *= 256; ipaddr += o.to_i}
+
+  return ipaddr
+end
+
+def ipaddr2str(ipaddr, delim = '.')
+  octet = []
+  for i in 0..3
+    addr = ipaddr
+    addr = addr >> (i * 8)
+    addr = addr & 255
+
+    octet.unshift(addr)
+  end
+
+  str = octet.join(delim)
+  return str
+end
+
+#
+# Token class
+#
+
+class Token
+  #def initialize(func = lambda {|mode|
+  #                        Readline.readline(::PROMPT[mode], true) })
+  def initialize(func)
+    @buf = []
+    @func = func
+  end
+  def get(mode)
+    if @buf.size == 0 then
+      line = @func.call(mode)
+      if line.nil? then
+        return nil
+      end
+
+      @buf = line.chomp.strip.split(/\s+/)
+      @buf.push ""
+    end
+    return @buf.shift
+  end
+  def push(token)
+    @buf.unshift(token)
+    self
+  end
+end
+
+#
+# Parser
+#
+
+#def parseinput(mode = :global, funcinput)
+def parseinput(mode, funcinput)
+  buf = funcinput.get(mode)
+
+  case mode
+  when :global
+    case buf
+    when /^(\d+\.\d+\.\d+\.\d+)?\/([0-9a-fA-Fx.]+)$/
+      ipaddr = $1
+      mask = $2
+      result(ipaddr, mask)
+    when /^(\d+\.\d+\.\d+\.\d+)$/
+      ipaddr = $1
+      result(ipaddr, parseinput(:expect_subnetmask, funcinput))
+    when /^\/([0-9a-fA-Fx.]+)$/
+      mask = $1
+      result(nil, mask)
+    when nil
+      return nil
+    end
+    return(parseinput(:global, funcinput))
+
+  when :expect_subnetmask
+    case buf
+    when /^\/?(\d+\.\d+\.\d+\.\d+)$/
+      # dotted decimal
+      return $1
+    when /^\/?(\d+)$/
+      # length
+      return $1
+    when /^\/?(0x[0-9a-fA-F]+)$/
+      # hex
+      return $1
+    when /^\./, /^end$/i
+      return nil
+    when nil
+      return nil
+    end
+    return(parseinput(:expect_subnetmask, funcinput))
+  end
+end
+
+#
+# show result
+#
+
+def result(ipaddr, prefixlen)
+  if ipaddr.nil? then
+    if $recent_ip then
+      ipaddr = $recent_ip
+    else
+      ipaddr = DEFAULT_IP.dup
+    end
+  end
+  $recent_ip = ipaddr
+  return if prefixlen.nil?
+
+  case prefixlen
+  when /^0x/
+    # hex
+    prefixlen = prefixlen.hex
+    l = 0
+    for i in 0...BITLENGTH
+      if (prefixlen[i] === 1) then
+        l = i
+        break
+      end
+    end
+
+    prefixlen = BITLENGTH - l
+  when /\./
+    # dotted decimal (inverse or in-order mask)
+    prefixlen = str2ipaddr(prefixlen)
+    if (prefixlen[BITLENGTH - 1] === 0) then
+      # make inverse mask into in-order mask
+      prefixlen = ALLONE ^ prefixlen
+    end
+
+    l = 0
+    for i in 0...BITLENGTH
+      if (prefixlen[i] === 1) then
+        l = i
+        break
+      end
+    end
+
+    prefixlen = BITLENGTH - l
+  else
+    # numeric (length)
+    prefixlen = prefixlen.to_i
+  end
+
+
+  mask = (ALLONE & ~(2 ** (BITLENGTH - prefixlen) - 1))
+  size = 2 ** (BITLENGTH - prefixlen)
+
+  ipaddr = str2ipaddr(ipaddr)
+  networkaddr = ipaddr & mask
+  broadcastaddr = networkaddr + size - 1
+
+
+  if (!$flag_dump) then
+    print "IP address    : ", ipaddr2str(ipaddr), "\n"
+    print "Netmask       : ", ipaddr2str(mask),
+                              " (", ipaddr2str(ALLONE ^ mask), ")", "\n"
+    print "Prefix length : /", prefixlen, "\n"
+    print "Network addr. : ", ipaddr2str(networkaddr), "\n"
+    print "Broadcast     : ", ipaddr2str(broadcastaddr), "\n"
+    print "# of IP addr. : ", size, " (#{size - 2})", "\n\n"
+  end
+
+  if ($flag_dump) then
+    for i in networkaddr..broadcastaddr
+      next if !$flag_full && i === networkaddr
+      next if !$flag_full && i === broadcastaddr
+
+      print ipaddr2str(i), "\n"
+    end
+  end
+end
+
+###########################################################################
+# Main
+###########################################################################
+
+commandline = []
+ARGV.each do |arg|
+  case arg
+  when /^-d/
+    $flag_dump = true
+  when /^-f/
+    $flag_full = true
+  when /^-h/
+    usage; exit
+  when /^-v/
+    $flag_verbose += 1
+  else
+    commandline.push arg
+  end
+end
+
+if commandline.size > 0 then
+  # commandline mode
+  parseinput(:global, Token.new(lambda {|dummy| commandline.shift }))
+else
+  # interactive mode
+  parseinput(:global,
+    Token.new(lambda {|mode|
+      Readline.readline(PROMPT[mode], true) }))
+end
